@@ -224,14 +224,35 @@ fn run_show(
 
     // `git show rev:path` prints a blob, not a commit diff. In this mode we should
     // pass through directly to avoid duplicated output from compact-show steps.
-    let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
+    let blob_show_arg = args.iter().find(|arg| is_blob_show_arg(arg)).cloned();
+    let wants_blob_show = blob_show_arg.is_some();
+    let wants_no_compact = args.iter().any(|arg| arg == "--no-compact");
 
     if wants_stat_only || wants_format || wants_blob_show {
         let mut cmd = git_cmd(global_args);
         cmd.arg("show");
         for arg in args {
+            if arg == "--no-compact" {
+                continue;
+            }
             cmd.arg(arg);
         }
+
+        if let Some(blob_arg) = blob_show_arg.as_deref() {
+            if !wants_no_compact {
+                if let Some(summary) = summarize_large_blob_show(blob_arg, args, global_args)? {
+                    println!("{}", summary.output);
+                    timer.track(
+                        &format!("git show {}", args.join(" ")),
+                        &format!("rtk git show {}", args.join(" ")),
+                        &"x".repeat(summary.estimated_input_bytes.min(MAX_TRACKING_BYTES)),
+                        &summary.output,
+                    );
+                    return Ok(0);
+                }
+            }
+        }
+
         let result = exec_capture(&mut cmd).context("Failed to run git show")?;
         if !result.success() {
             eprintln!("{}", result.stderr);
@@ -245,7 +266,11 @@ fn run_show(
 
         timer.track(
             &format!("git show {}", args.join(" ")),
-            &format!("rtk git show {} (passthrough)", args.join(" ")),
+            &format!(
+                "rtk git show {}{}",
+                args.join(" "),
+                if wants_no_compact { " (raw)" } else { " (passthrough)" }
+            ),
             &result.stdout,
             &result.stdout,
         );
@@ -320,6 +345,124 @@ fn run_show(
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     !arg.starts_with('-') && arg.contains(':')
+}
+
+const LARGE_BLOB_BYTES: usize = 64 * 1024;
+const MAX_TRACKING_BYTES: usize = 2 * 1024 * 1024;
+
+struct BlobShowSummary {
+    output: String,
+    estimated_input_bytes: usize,
+}
+
+fn summarize_large_blob_show(
+    blob_arg: &str,
+    args: &[String],
+    global_args: &[String],
+) -> Result<Option<BlobShowSummary>> {
+    let object_type = git_cat_file(global_args, "-t", blob_arg)?;
+    if object_type.trim() != "blob" {
+        return Ok(None);
+    }
+
+    let size_text = git_cat_file(global_args, "-s", blob_arg)?;
+    let size_bytes = size_text.trim().parse::<usize>().unwrap_or(0);
+    let path = blob_arg.split_once(':').map(|(_, path)| path).unwrap_or(blob_arg);
+    let classification = classify_blob_path(path, size_bytes);
+    let should_summarize = size_bytes >= LARGE_BLOB_BYTES || classification.is_risky;
+
+    if !should_summarize {
+        return Ok(None);
+    }
+
+    let output = format_blob_show_summary(blob_arg, path, size_bytes, &classification, args);
+    Ok(Some(BlobShowSummary {
+        output,
+        estimated_input_bytes: size_bytes,
+    }))
+}
+
+fn git_cat_file(global_args: &[String], mode: &str, object: &str) -> Result<String> {
+    let mut cmd = git_cmd(global_args);
+    cmd.args(["cat-file", mode, object]);
+    let result = exec_capture(&mut cmd).context("Failed to run git cat-file")?;
+    if !result.success() {
+        return Ok(String::new());
+    }
+    Ok(result.stdout)
+}
+
+struct BlobClassification {
+    label: &'static str,
+    is_risky: bool,
+}
+
+fn classify_blob_path(path: &str, size_bytes: usize) -> BlobClassification {
+    let lower = path.to_ascii_lowercase();
+    let extension = lower.rsplit('.').next().unwrap_or("");
+
+    let label = match extension {
+        "jar" | "war" | "ear" | "zip" | "gz" | "tgz" | "tar" | "bz2" | "xz" | "7z" | "rar" => {
+            "archive/compressed"
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "pdf" | "class" | "so" | "dylib"
+        | "dll" | "exe" | "bin" => "binary",
+        "min" => "minified/generated",
+        "lock" => "lockfile/generated",
+        "model" | "onnx" | "safetensors" | "pt" | "pth" | "tflite" => "model/binary",
+        "log" => "log",
+        "json" if size_bytes >= LARGE_BLOB_BYTES => "large-json",
+        "txt" | "md" | "rs" | "java" | "kt" | "js" | "ts" | "tsx" | "jsx" | "py" | "go"
+        | "rb" | "php" | "yml" | "yaml" | "toml" | "xml" | "html" | "css" | "scss" | "sh"
+        | "zsh" | "bash" | "sql" => "large-text",
+        _ if size_bytes >= LARGE_BLOB_BYTES => "large-blob",
+        _ => "blob",
+    };
+
+    let is_risky = !matches!(label, "blob" | "large-text") || size_bytes >= LARGE_BLOB_BYTES;
+    BlobClassification { label, is_risky }
+}
+
+fn format_blob_show_summary(
+    blob_arg: &str,
+    path: &str,
+    size_bytes: usize,
+    classification: &BlobClassification,
+    args: &[String],
+) -> String {
+    let token_estimate = tracking::estimate_tokens(&"x".repeat(size_bytes.min(MAX_TRACKING_BYTES)));
+    let token_suffix = if size_bytes > MAX_TRACKING_BYTES {
+        "+"
+    } else {
+        ""
+    };
+
+    let mut lines = vec![
+        "git show blob summarized".to_string(),
+        format!("object: {}", blob_arg),
+        format!("path: {}", path),
+        format!("class: {}", classification.label),
+        format!(
+            "size: {} bytes (~{}{} tokens)",
+            size_bytes, token_estimate, token_suffix
+        ),
+        "reason: large or non-text blob would be expensive to print".to_string(),
+        format!("raw: rtk git show --no-compact {}", args.join(" ")),
+        format!("metadata: {}", git_ls_tree_hint(blob_arg, path)),
+    ];
+
+    if classification.label == "archive/compressed" {
+        lines.push("archive tip: use jar tf, unzip -l, or tar -tf before extracting content".to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn git_ls_tree_hint(blob_arg: &str, path: &str) -> String {
+    match blob_arg.split_once(':') {
+        Some((rev, _)) => format!("rtk git ls-tree -l {} -- {}", rev, path),
+        None => format!("rtk git ls-tree -l {}", blob_arg),
+    }
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {

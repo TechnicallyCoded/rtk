@@ -514,25 +514,26 @@ fn show_token_impact(tracker: &Tracker, project_scope: Option<&str>) -> Result<(
     println!("{}", styled("Token Impact (highest raw output volume)", true));
     println!("──────────────────────────────────────────────────────────");
     println!(
-        "{:>3}  {:<28}  {:>5}  {:>8}  {:>8}  {:>8}  {:>6}",
-        "#", "Command", "Count", "Raw", "Shown", "Saved", "Avg%"
+        "{:>3}  {:<28}  {:>5}  {:>8}  {:>8}  {:>8}  {:>6}  {:>6}",
+        "#", "Command", "Count", "Raw", "Shown", "Saved", "Avg%", "Time"
     );
-    println!("{}", "─".repeat(78));
+    println!("{}", "─".repeat(86));
 
     for (idx, row) in rows.iter().enumerate() {
         println!(
-            "{:>2}.  {:<28}  {:>5}  {:>8}  {:>8}  {:>8}  {:>6.1}%",
+            "{:>2}.  {:<28}  {:>5}  {:>8}  {:>8}  {:>8}  {:>6.1}%  {:>6}",
             idx + 1,
             truncate_for_column(&row.rtk_cmd, 28),
             row.count,
             format_tokens(row.input_tokens),
             format_tokens(row.output_tokens),
             format_tokens(row.saved_tokens),
-            row.avg_savings_pct
+            row.avg_savings_pct,
+            format_duration(row.avg_time_ms)
         );
     }
 
-    println!("{}", "─".repeat(78));
+    println!("{}", "─".repeat(86));
     println!(
         "Use this to improve general filters or narrow broad commands. Do not add one-off filters for a single bad invocation."
     );
