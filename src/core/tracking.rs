@@ -223,6 +223,25 @@ pub struct MonthStats {
 /// Type alias for command statistics tuple: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
+/// Aggregated command group ranked by token impact.
+#[derive(Debug)]
+pub struct CommandImpact {
+    /// RTK command string.
+    pub rtk_cmd: String,
+    /// Number of invocations in the group.
+    pub count: usize,
+    /// Estimated tokens in the original command output.
+    pub input_tokens: usize,
+    /// Estimated tokens emitted by RTK after filtering.
+    pub output_tokens: usize,
+    /// Estimated tokens saved by RTK.
+    pub saved_tokens: usize,
+    /// Average savings percentage across invocations.
+    pub avg_savings_pct: f64,
+    /// Average execution time in milliseconds.
+    pub avg_time_ms: u64,
+}
+
 impl Tracker {
     /// Create a new tracker instance.
     ///
@@ -890,6 +909,51 @@ impl Tracker {
                     rtk_cmd: row.get(1)?,
                     saved_tokens: row.get::<_, i64>(2)? as usize,
                     savings_pct: row.get(3)?,
+                })
+            },
+        )?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Get command groups with the highest raw token impact.
+    ///
+    /// This reveals broad commands and weak filters that matter most. It ranks
+    /// by original output volume, then emitted output volume, instead of ranking
+    /// by tokens saved.
+    pub fn get_token_impact_filtered(
+        &self,
+        limit: usize,
+        project_path: Option<&str>,
+    ) -> Result<Vec<CommandImpact>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd,
+                    COUNT(*) as cnt,
+                    SUM(input_tokens) as input,
+                    SUM(output_tokens) as output,
+                    SUM(saved_tokens) as saved,
+                    AVG(savings_pct) as avg_sav,
+                    AVG(exec_time_ms) as avg_time
+             FROM commands
+             WHERE input_tokens > 0
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY rtk_cmd
+             ORDER BY SUM(input_tokens) DESC, SUM(output_tokens) DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            params![project_exact, project_glob, limit as i64],
+            |row| {
+                Ok(CommandImpact {
+                    rtk_cmd: row.get(0)?,
+                    count: row.get::<_, i64>(1)? as usize,
+                    input_tokens: row.get::<_, i64>(2)? as usize,
+                    output_tokens: row.get::<_, i64>(3)? as usize,
+                    saved_tokens: row.get::<_, i64>(4)? as usize,
+                    avg_savings_pct: row.get(5)?,
+                    avg_time_ms: row.get::<_, f64>(6)? as u64,
                 })
             },
         )?;

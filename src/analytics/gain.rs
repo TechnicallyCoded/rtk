@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -16,6 +17,11 @@ pub fn run(
     project: bool, // added: per-project scope flag
     graph: bool,
     history: bool,
+    impact: bool,
+    impact_tree: bool,
+    impact_tree_max_depth: usize,
+    impact_tree_label_width: usize,
+    impact_tree_top_n: Vec<usize>,
     quota: bool,
     tier: &str,
     daily: bool,
@@ -258,6 +264,20 @@ pub fn run(
             }
         }
 
+        if impact {
+            show_token_impact(&tracker, project_scope.as_deref())?;
+        }
+
+        if impact_tree {
+            show_token_impact_tree(
+                &tracker,
+                project_scope.as_deref(),
+                impact_tree_max_depth,
+                impact_tree_label_width,
+                &impact_tree_top_n,
+            )?;
+        }
+
         if quota {
             const ESTIMATED_PRO_MONTHLY: usize = 6_000_000;
 
@@ -479,6 +499,228 @@ fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
     let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered variant
     print_period_table(&months);
     Ok(())
+}
+
+fn show_token_impact(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
+    let rows = tracker.get_token_impact_filtered(12, project_scope)?;
+    if rows.is_empty() {
+        println!("{}", styled("Token Impact", true));
+        println!("──────────────────────────────────────────────────────────");
+        println!("No token impact data yet.");
+        println!();
+        return Ok(());
+    }
+
+    println!("{}", styled("Token Impact (highest raw output volume)", true));
+    println!("──────────────────────────────────────────────────────────");
+    println!(
+        "{:>3}  {:<28}  {:>5}  {:>8}  {:>8}  {:>8}  {:>6}",
+        "#", "Command", "Count", "Raw", "Shown", "Saved", "Avg%"
+    );
+    println!("{}", "─".repeat(78));
+
+    for (idx, row) in rows.iter().enumerate() {
+        println!(
+            "{:>2}.  {:<28}  {:>5}  {:>8}  {:>8}  {:>8}  {:>6.1}%",
+            idx + 1,
+            truncate_for_column(&row.rtk_cmd, 28),
+            row.count,
+            format_tokens(row.input_tokens),
+            format_tokens(row.output_tokens),
+            format_tokens(row.saved_tokens),
+            row.avg_savings_pct
+        );
+    }
+
+    println!("{}", "─".repeat(78));
+    println!(
+        "Use this to improve general filters or narrow broad commands. Do not add one-off filters for a single bad invocation."
+    );
+    println!();
+    Ok(())
+}
+
+#[derive(Default)]
+struct ImpactTreeNode {
+    input_tokens: usize,
+    output_tokens: usize,
+    saved_tokens: usize,
+    count: usize,
+    children: BTreeMap<String, ImpactTreeNode>,
+}
+
+fn show_token_impact_tree(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    max_depth: usize,
+    label_width: usize,
+    top_n_by_depth: &[usize],
+) -> Result<()> {
+    let max_depth = max_depth.max(1);
+    let label_width = label_width.clamp(16, 120);
+    let rows = tracker.get_token_impact_filtered(5000, project_scope)?;
+    if rows.is_empty() {
+        println!("{}", styled("Token Impact Tree", true));
+        println!("──────────────────────────────────────────────────────────");
+        println!("No token impact data yet.");
+        println!();
+        return Ok(());
+    }
+
+    let total_input: usize = rows.iter().map(|row| row.input_tokens).sum();
+    let mut root = ImpactTreeNode::default();
+    for row in rows {
+        root.input_tokens += row.input_tokens;
+        root.output_tokens += row.output_tokens;
+        root.saved_tokens += row.saved_tokens;
+        root.count += row.count;
+
+        let parts = impact_tree_parts(&row.rtk_cmd, max_depth);
+        add_impact_tree_row(&mut root, &parts, &row);
+    }
+
+    println!("{}", styled("Token Impact Tree", true));
+    println!("──────────────────────────────────────────────────────────");
+    print_impact_tree_children(&root, 0, "", total_input, label_width, top_n_by_depth);
+    println!();
+    println!(
+        "Each bar is relative to the highest sibling at that depth. Percent is share of total raw tokens."
+    );
+    println!();
+    Ok(())
+}
+
+fn impact_tree_parts(command: &str, max_depth: usize) -> Vec<String> {
+    let mut parts: Vec<String> = command
+        .split_whitespace()
+        .filter(|part| *part != "rtk")
+        .map(|part| part.to_string())
+        .collect();
+
+    if parts.is_empty() {
+        parts.push("<unknown>".to_string());
+    }
+
+    if parts.len() > max_depth {
+        parts.truncate(max_depth);
+        if let Some(last) = parts.last_mut() {
+            *last = "<args>".to_string();
+        }
+    }
+
+    parts
+}
+
+fn add_impact_tree_row(
+    root: &mut ImpactTreeNode,
+    parts: &[String],
+    row: &crate::core::tracking::CommandImpact,
+) {
+    let mut current = root;
+    for part in parts {
+        current = current.children.entry(part.clone()).or_default();
+        current.input_tokens += row.input_tokens;
+        current.output_tokens += row.output_tokens;
+        current.saved_tokens += row.saved_tokens;
+        current.count += row.count;
+    }
+}
+
+fn print_impact_tree_children(
+    node: &ImpactTreeNode,
+    depth: usize,
+    prefix: &str,
+    total_input: usize,
+    label_width: usize,
+    top_n_by_depth: &[usize],
+) {
+    let mut children: Vec<(&String, &ImpactTreeNode)> = node.children.iter().collect();
+    children.sort_by(|(_, left), (_, right)| {
+        right
+            .input_tokens
+            .cmp(&left.input_tokens)
+            .then_with(|| right.output_tokens.cmp(&left.output_tokens))
+    });
+
+    let top_n = top_n_by_depth.get(depth).copied().unwrap_or(5);
+    let shown = children.len().min(top_n);
+    let max_sibling_input = children
+        .iter()
+        .map(|(_, child)| child.input_tokens)
+        .max()
+        .unwrap_or(1);
+
+    for (idx, (label, child)) in children.iter().take(shown).enumerate() {
+        let is_last_visible = idx + 1 == shown && children.len() <= shown;
+        let branch = if depth == 0 {
+            ""
+        } else if is_last_visible {
+            "└ "
+        } else {
+            "├ "
+        };
+        let child_prefix = if depth == 0 {
+            String::new()
+        } else if is_last_visible {
+            format!("{prefix}  ")
+        } else {
+            format!("{prefix}│ ")
+        };
+        let share = if total_input > 0 {
+            (child.input_tokens as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+        let avg_savings = if child.input_tokens > 0 {
+            (child.saved_tokens as f64 / child.input_tokens as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let label_cell = format!("{prefix}{branch}{label}");
+        let label_cell = truncate_for_column(&label_cell, label_width);
+        let bar = mini_bar(child.input_tokens, max_sibling_input, 10);
+        println!(
+            "{:<label_width$} {:<10} {:>6.1}%  raw={:<7} shown={:<7} saved={:<7} avg={:>5.1}% count={}",
+            label_cell,
+            bar,
+            share,
+            format_tokens(child.input_tokens),
+            format_tokens(child.output_tokens),
+            format_tokens(child.saved_tokens),
+            avg_savings,
+            child.count
+        );
+
+        print_impact_tree_children(
+            child,
+            depth + 1,
+            &child_prefix,
+            total_input,
+            label_width,
+            top_n_by_depth,
+        );
+    }
+
+    if children.len() > shown {
+        let hidden = &children[shown..];
+        let hidden_input: usize = hidden.iter().map(|(_, child)| child.input_tokens).sum();
+        let hidden_share = if total_input > 0 {
+            (hidden_input as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+        let branch = if depth == 0 { "" } else { "└ " };
+        let label_cell = format!("{}{}<{} more>", prefix, branch, hidden.len());
+        let label_cell = truncate_for_column(&label_cell, label_width);
+        println!(
+            "{:<label_width$} {:<10} {:>6.1}%  raw={}",
+            label_cell,
+            mini_bar(hidden_input, max_sibling_input, 10),
+            hidden_share,
+            format_tokens(hidden_input)
+        );
+    }
 }
 
 #[derive(Serialize)]
