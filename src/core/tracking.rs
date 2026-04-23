@@ -31,7 +31,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -342,6 +342,25 @@ impl Tracker {
             [],
         )?;
 
+        Ok(Self { conn })
+    }
+
+    /// Open a read-only historical tracking database snapshot from `history/`.
+    ///
+    /// `date` must be `YYYY-MM-DD`. The selected file is the newest database
+    /// snapshot whose filename date is less than or equal to `date`.
+    pub fn from_history_date(date: &str) -> Result<Self> {
+        validate_history_date(date)?;
+        let history_dir = std::env::current_dir()?.join("history");
+        let db_path = select_history_db(&history_dir, date)?;
+        let db_uri = format!(
+            "file:{}?mode=ro&immutable=1",
+            sqlite_uri_path(&db_path)
+        );
+        let conn = Connection::open_with_flags(
+            &db_uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
         Ok(Self { conn })
     }
 
@@ -1233,6 +1252,59 @@ fn get_db_path() -> Result<PathBuf> {
     // Priority 3: Default platform-specific location
     let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+}
+
+fn validate_history_date(date: &str) -> Result<()> {
+    let valid = date.len() == 10
+        && date.as_bytes()[4] == b'-'
+        && date.as_bytes()[7] == b'-'
+        && date
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| idx == 4 || idx == 7 || ch.is_ascii_digit());
+    if valid {
+        Ok(())
+    } else {
+        anyhow::bail!("expected --db-date in YYYY-MM-DD format, got {date}");
+    }
+}
+
+fn select_history_db(history_dir: &std::path::Path, date: &str) -> Result<PathBuf> {
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+
+    for entry in std::fs::read_dir(history_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.len() < 13 || !file_name.ends_with(".db") {
+            continue;
+        }
+
+        let file_date = &file_name[..10];
+        if validate_history_date(file_date).is_ok() && file_date <= date {
+            candidates.push((file_date.to_string(), path));
+        }
+    }
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
+        .pop()
+        .map(|(_, path)| path)
+        .ok_or_else(|| anyhow::anyhow!("no history database found in history/ at or before {date}"))
+}
+
+fn sqlite_uri_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+        .replace(' ', "%20")
 }
 
 /// Individual parse failure record.

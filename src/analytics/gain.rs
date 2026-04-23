@@ -17,6 +17,7 @@ pub fn run(
     project: bool, // added: per-project scope flag
     graph: bool,
     history: bool,
+    db_date: Option<&str>,
     impact: bool,
     impact_tree: bool,
     impact_tree_max_depth: usize,
@@ -32,7 +33,11 @@ pub fn run(
     failures: bool,
     _verbose: u8,
 ) -> Result<()> {
-    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    let tracker = match db_date {
+        Some(date) => Tracker::from_history_date(date)
+            .with_context(|| format!("Failed to initialize history database for {date}"))?,
+        None => Tracker::new().context("Failed to initialize tracking database")?,
+    };
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
     if failures {

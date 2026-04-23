@@ -388,6 +388,9 @@ enum Commands {
         /// Show recent command history
         #[arg(short = 'H', long)]
         history: bool,
+        /// Read gain analytics from history/<date>.db snapshot at or before YYYY-MM-DD
+        #[arg(long = "db-date")]
+        db_date: Option<String>,
         /// Show commands with the highest raw token impact
         #[arg(short = 'I', long)]
         impact: bool,
@@ -1833,6 +1836,7 @@ fn run_cli() -> Result<i32> {
             project, // added
             graph,
             history,
+            db_date,
             impact,
             impact_tree,
             impact_tree_max_depth,
@@ -1858,6 +1862,7 @@ fn run_cli() -> Result<i32> {
                 project, // added: pass project flag
                 graph,
                 history,
+                db_date.as_deref(),
                 impact,
                 impact_tree,
                 impact_tree_max_depth,
