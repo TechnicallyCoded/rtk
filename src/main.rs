@@ -453,6 +453,9 @@ enum Commands {
         failures: bool,
     },
 
+    /// List local history database snapshots newest first
+    HistoryList {},
+
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
     CcEconomics {
         /// Show detailed daily breakdown
@@ -1344,6 +1347,82 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
     }
 }
 
+fn run_history_list() -> Result<()> {
+    let history_dir = std::env::current_dir()?.join("history");
+    let mut snapshots: Vec<(String, std::path::PathBuf, u64)> = Vec::new();
+
+    if !history_dir.is_dir() {
+        println!("No history directory found.");
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(&history_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.ends_with(".db") || file_name.len() < 13 {
+            continue;
+        }
+        let date = &file_name[..10];
+        if !is_history_date(date) {
+            continue;
+        }
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        snapshots.push((date.to_string(), path, size));
+    }
+
+    snapshots.sort_by(|left, right| right.0.cmp(&left.0));
+
+    if snapshots.is_empty() {
+        println!("No history database snapshots found in history/.");
+        return Ok(());
+    }
+
+    println!("History database snapshots");
+    println!("──────────────────────────────────────────────────────────");
+    for (date, path, size) in snapshots {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<unknown>");
+        println!("{date}  {:>8}  history/{file_name}", format_bytes(size));
+    }
+
+    Ok(())
+}
+
+fn is_history_date(date: &str) -> bool {
+    date.len() == 10
+        && date.as_bytes()[4] == b'-'
+        && date.as_bytes()[7] == b'-'
+        && date
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| idx == 4 || idx == 7 || ch.is_ascii_digit())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GB {
+        format!("{:.1}G", bytes_f / GB)
+    } else if bytes_f >= MB {
+        format!("{:.1}M", bytes_f / MB)
+    } else if bytes_f >= KB {
+        format!("{:.1}K", bytes_f / KB)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
 fn main() {
     let code = match run_cli() {
         Ok(code) => code,
@@ -1880,6 +1959,11 @@ fn run_cli() -> Result<i32> {
                 failures,
                 cli.verbose,
             )?;
+            0
+        }
+
+        Commands::HistoryList {} => {
+            run_history_list()?;
             0
         }
 
