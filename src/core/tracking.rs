@@ -980,6 +980,52 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Get command groups with high emitted tokens and low savings.
+    ///
+    /// This ranks by RTK output volume, not raw command volume, so it surfaces
+    /// commands where filtering likely missed the largest token-saving opportunities.
+    pub fn get_missed_opportunity_filtered(
+        &self,
+        limit: usize,
+        project_path: Option<&str>,
+    ) -> Result<Vec<CommandImpact>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd,
+                    COUNT(*) as cnt,
+                    SUM(input_tokens) as input,
+                    SUM(output_tokens) as output,
+                    SUM(saved_tokens) as saved,
+                    AVG(savings_pct) as avg_sav,
+                    AVG(exec_time_ms) as avg_time
+             FROM commands
+             WHERE input_tokens > 0
+               AND output_tokens > 0
+               AND (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY rtk_cmd
+             HAVING avg_sav < 30.0
+             ORDER BY SUM(output_tokens) DESC, SUM(input_tokens) DESC
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            params![project_exact, project_glob, limit as i64],
+            |row| {
+                Ok(CommandImpact {
+                    rtk_cmd: row.get(0)?,
+                    count: row.get::<_, i64>(1)? as usize,
+                    input_tokens: row.get::<_, i64>(2)? as usize,
+                    output_tokens: row.get::<_, i64>(3)? as usize,
+                    saved_tokens: row.get::<_, i64>(4)? as usize,
+                    avg_savings_pct: row.get(5)?,
+                    avg_time_ms: row.get::<_, f64>(6)? as u64,
+                })
+            },
+        )?;
+
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Count commands since a given timestamp (for telemetry).
     pub fn count_commands_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<i64> {
         let ts = since.format("%Y-%m-%dT%H:%M:%S").to_string();

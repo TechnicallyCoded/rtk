@@ -20,6 +20,7 @@ pub fn run(
     db_date: Option<&str>,
     impact: bool,
     impact_tree: bool,
+    missed_opportunity_tree: bool,
     impact_tree_max_depth: usize,
     impact_tree_label_width: usize,
     impact_tree_top_n: Vec<usize>,
@@ -275,6 +276,16 @@ pub fn run(
 
         if impact_tree {
             show_token_impact_tree(
+                &tracker,
+                project_scope.as_deref(),
+                impact_tree_max_depth,
+                impact_tree_label_width,
+                &impact_tree_top_n,
+            )?;
+        }
+
+        if missed_opportunity_tree {
+            show_missed_opportunity_tree(
                 &tracker,
                 project_scope.as_deref(),
                 impact_tree_max_depth,
@@ -596,6 +607,47 @@ fn show_token_impact_tree(
     Ok(())
 }
 
+fn show_missed_opportunity_tree(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    max_depth: usize,
+    label_width: usize,
+    top_n_by_depth: &[usize],
+) -> Result<()> {
+    let max_depth = max_depth.max(1);
+    let label_width = label_width.clamp(16, 120);
+    let rows = tracker.get_missed_opportunity_filtered(5000, project_scope)?;
+    if rows.is_empty() {
+        println!("{}", styled("Missed Opportunity Tree", true));
+        println!("──────────────────────────────────────────────────────────");
+        println!("No low-savings emitted-token data yet.");
+        println!();
+        return Ok(());
+    }
+
+    let total_output: usize = rows.iter().map(|row| row.output_tokens).sum();
+    let mut root = ImpactTreeNode::default();
+    for row in rows {
+        root.input_tokens += row.input_tokens;
+        root.output_tokens += row.output_tokens;
+        root.saved_tokens += row.saved_tokens;
+        root.count += row.count;
+
+        let parts = impact_tree_parts(&row.rtk_cmd, max_depth);
+        add_impact_tree_row(&mut root, &parts, &row);
+    }
+
+    println!("{}", styled("Missed Opportunity Tree (low savings, highest emitted tokens)", true));
+    println!("──────────────────────────────────────────────────────────");
+    print_missed_opportunity_children(&root, 0, "", total_output, label_width, top_n_by_depth);
+    println!();
+    println!(
+        "Each bar is relative to the highest sibling by emitted tokens. Percent is share of low-savings emitted tokens."
+    );
+    println!();
+    Ok(())
+}
+
 fn impact_tree_parts(command: &str, max_depth: usize) -> Vec<String> {
     let mut parts: Vec<String> = command
         .split_whitespace()
@@ -725,6 +777,103 @@ fn print_impact_tree_children(
             mini_bar(hidden_input, max_sibling_input, 10),
             hidden_share,
             format_tokens(hidden_input)
+        );
+    }
+}
+
+fn print_missed_opportunity_children(
+    node: &ImpactTreeNode,
+    depth: usize,
+    prefix: &str,
+    total_output: usize,
+    label_width: usize,
+    top_n_by_depth: &[usize],
+) {
+    let mut children: Vec<(&String, &ImpactTreeNode)> = node.children.iter().collect();
+    children.sort_by(|(_, left), (_, right)| {
+        right
+            .output_tokens
+            .cmp(&left.output_tokens)
+            .then_with(|| right.input_tokens.cmp(&left.input_tokens))
+    });
+
+    let top_n = top_n_by_depth.get(depth).copied().unwrap_or(5);
+    let shown = children.len().min(top_n);
+    let max_sibling_output = children
+        .iter()
+        .map(|(_, child)| child.output_tokens)
+        .max()
+        .unwrap_or(1);
+
+    for (idx, (label, child)) in children.iter().take(shown).enumerate() {
+        let is_last_visible = idx + 1 == shown && children.len() <= shown;
+        let branch = if depth == 0 {
+            ""
+        } else if is_last_visible {
+            "└ "
+        } else {
+            "├ "
+        };
+        let child_prefix = if depth == 0 {
+            String::new()
+        } else if is_last_visible {
+            format!("{prefix}  ")
+        } else {
+            format!("{prefix}│ ")
+        };
+        let share = if total_output > 0 {
+            (child.output_tokens as f64 / total_output as f64) * 100.0
+        } else {
+            0.0
+        };
+        let avg_savings = if child.input_tokens > 0 {
+            (child.saved_tokens as f64 / child.input_tokens as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let label_cell = format!("{prefix}{branch}{label}");
+        let label_cell = truncate_for_column(&label_cell, label_width);
+        let bar = mini_bar(child.output_tokens, max_sibling_output, 10);
+        println!(
+            "{:<label_width$} {:<10} {:>6.1}%  shown={:<7} raw={:<7} saved={:<7} avg={:>5.1}% count={}",
+            label_cell,
+            bar,
+            share,
+            format_tokens(child.output_tokens),
+            format_tokens(child.input_tokens),
+            format_tokens(child.saved_tokens),
+            avg_savings,
+            child.count
+        );
+
+        print_missed_opportunity_children(
+            child,
+            depth + 1,
+            &child_prefix,
+            total_output,
+            label_width,
+            top_n_by_depth,
+        );
+    }
+
+    if children.len() > shown {
+        let hidden = &children[shown..];
+        let hidden_output: usize = hidden.iter().map(|(_, child)| child.output_tokens).sum();
+        let hidden_share = if total_output > 0 {
+            (hidden_output as f64 / total_output as f64) * 100.0
+        } else {
+            0.0
+        };
+        let branch = if depth == 0 { "" } else { "└ " };
+        let label_cell = format!("{}{}<{} more>", prefix, branch, hidden.len());
+        let label_cell = truncate_for_column(&label_cell, label_width);
+        println!(
+            "{:<label_width$} {:<10} {:>6.1}%  shown={}",
+            label_cell,
+            mini_bar(hidden_output, max_sibling_output, 10),
+            hidden_share,
+            format_tokens(hidden_output)
         );
     }
 }

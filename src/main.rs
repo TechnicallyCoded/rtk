@@ -397,35 +397,38 @@ enum Commands {
         /// Show raw token impact as a command tree
         #[arg(long)]
         impact_tree: bool,
+        /// Show low-savings emitted-token impact as a command tree
+        #[arg(long)]
+        missed_opportunity_tree: bool,
         /// Maximum depth for --impact-tree
-        #[arg(long = "max-depth", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "max-depth", default_value_t = 3)]
         impact_tree_max_depth: usize,
         /// Command label column width for --impact-tree
-        #[arg(long = "cmd-len", default_value_t = 32, requires = "impact_tree")]
+        #[arg(long = "cmd-len", default_value_t = 32)]
         impact_tree_label_width: usize,
         /// Top entries to show at impact tree depth 0
-        #[arg(long = "top-n-0", default_value_t = 5, requires = "impact_tree")]
+        #[arg(long = "top-n-0", default_value_t = 5)]
         top_n_0: usize,
         /// Top entries to show at impact tree depth 1
-        #[arg(long = "top-n-1", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-1", default_value_t = 3)]
         top_n_1: usize,
         /// Top entries to show at impact tree depth 2
-        #[arg(long = "top-n-2", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-2", default_value_t = 3)]
         top_n_2: usize,
         /// Top entries to show at impact tree depth 3
-        #[arg(long = "top-n-3", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-3", default_value_t = 3)]
         top_n_3: usize,
         /// Top entries to show at impact tree depth 4
-        #[arg(long = "top-n-4", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-4", default_value_t = 3)]
         top_n_4: usize,
         /// Top entries to show at impact tree depth 5
-        #[arg(long = "top-n-5", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-5", default_value_t = 3)]
         top_n_5: usize,
         /// Top entries to show at impact tree depth 6
-        #[arg(long = "top-n-6", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-6", default_value_t = 3)]
         top_n_6: usize,
         /// Top entries to show at impact tree depth 7
-        #[arg(long = "top-n-7", default_value_t = 3, requires = "impact_tree")]
+        #[arg(long = "top-n-7", default_value_t = 3)]
         top_n_7: usize,
         /// Show monthly quota savings estimate
         #[arg(short, long)]
@@ -1918,6 +1921,7 @@ fn run_cli() -> Result<i32> {
             db_date,
             impact,
             impact_tree,
+            missed_opportunity_tree,
             impact_tree_max_depth,
             impact_tree_label_width,
             top_n_0,
@@ -1944,6 +1948,7 @@ fn run_cli() -> Result<i32> {
                 db_date.as_deref(),
                 impact,
                 impact_tree,
+                missed_opportunity_tree,
                 impact_tree_max_depth,
                 impact_tree_label_width,
                 vec![
