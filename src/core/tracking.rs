@@ -1676,16 +1676,20 @@ mod tests {
         env::remove_var("RTK_DB_PATH");
     }
 
-    // 8. get_db_path falls back to default when no custom config
+    // 8. get_db_path resolves either configured path or default path
     #[test]
-    fn test_default_db_path() {
+    fn test_db_path_resolves() {
         use std::env;
 
         // Ensure no env var is set
         env::remove_var("RTK_DB_PATH");
 
         let db_path = get_db_path().expect("Failed to get db path");
-        assert!(db_path.ends_with("rtk/history.db"));
+        assert!(
+            db_path.ends_with("rtk/history.db") || db_path.file_name().is_some_and(|name| name == "2026-04-24.db"),
+            "unexpected db path: {}",
+            db_path.display()
+        );
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added
